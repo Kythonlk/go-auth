@@ -1,56 +1,17 @@
 package sqlauthgo
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
 	"golang.org/x/crypto/bcrypt"
 )
-
-var (
-	jwtKey             = []byte(os.Getenv("JWT_TOKEN"))
-	accessTokenExpiry  = getEnvAsInt("ACCESS_TOKEN_EXPIRY", 30)
-	refreshTokenExpiry = getEnvAsInt("REFRESH_TOKEN_EXPIRY", 7*24*60)
-)
-
-type Claims struct {
-	Username string `json:"username"`
-	Role     string `json:"role"`
-	jwt.RegisteredClaims
-}
-
-type LoginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-type RegisterRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Role     string `json:"role"`
-}
-
-var db *sql.DB
-
-func getEnvAsInt(name string, defaultValue int) int {
-	valueStr := os.Getenv(name)
-	if valueStr == "" {
-		return defaultValue
-	}
-	value, err := strconv.Atoi(valueStr)
-	if err != nil {
-		return defaultValue
-	}
-	return value
-}
 
 func InitAuth(driver, dsn string) error {
 	var err error
@@ -63,30 +24,6 @@ func InitAuth(driver, dsn string) error {
 		return fmt.Errorf("failed to setup tables: %v", err)
 	}
 	return nil
-}
-
-func setupTables() error {
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS users (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			username TEXT UNIQUE NOT NULL,
-			password TEXT NOT NULL,
-			role TEXT NOT NULL DEFAULT 'user'
-		)
-	`)
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS tokens (
-			username TEXT PRIMARY KEY,
-			access_token TEXT,
-			refresh_token TEXT,
-			expires_at DATETIME
-		)
-	`)
-	return err
 }
 
 func Login(w http.ResponseWriter, r *http.Request) {
@@ -165,28 +102,67 @@ func Register(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "User registered successfully"})
 }
 
-func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		tokenString := r.Header.Get("Authorization")
-		if tokenString == "" || !strings.HasPrefix(tokenString, "Bearer ") {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		tokenString = strings.TrimPrefix(tokenString, "Bearer ")
-		claims := &Claims{}
-		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-			return jwtKey, nil
-		})
-
-		if err != nil || !token.Valid {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		ctx := r.Context()
-		ctx = context.WithValue(ctx, "username", claims.Username)
-		ctx = context.WithValue(ctx, "role", claims.Role)
-		next(w, r.WithContext(ctx))
+func RefreshToken(w http.ResponseWriter, r *http.Request) {
+	var requestBody map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
 	}
+	refreshToken := requestBody["refresh_token"]
+	if refreshToken == "" {
+		http.Error(w, "Refresh token is missing", http.StatusBadRequest)
+		return
+	}
+
+	token, err := jwt.ParseWithClaims(refreshToken, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+		return jwtKey, nil
+	})
+	if err != nil {
+		log.Printf("Error parsing refresh token: %v", err)
+		http.Error(w, "Invalid refresh token", http.StatusUnauthorized)
+		return
+	}
+
+	claims, ok := token.Claims.(*Claims)
+	if !ok || !token.Valid {
+		http.Error(w, "Invalid refresh token", http.StatusUnauthorized)
+		return
+	}
+
+	var storedRefreshToken, role string
+	err = db.QueryRow("SELECT refresh_token, role FROM tokens WHERE username = ?", claims.Username).Scan(&storedRefreshToken, &role)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "Refresh token not found", http.StatusUnauthorized)
+		} else {
+			log.Printf("Error querying refresh token: %v", err)
+			http.Error(w, "Failed to verify refresh token", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	storedRefreshToken = strings.TrimSpace(storedRefreshToken)
+
+	if storedRefreshToken != refreshToken {
+		log.Printf("Refresh token mismatch: stored=%s, received=%s", storedRefreshToken, refreshToken)
+		http.Error(w, "Invalid refresh token", http.StatusUnauthorized)
+		return
+	}
+
+	newAccessToken, err := generateAccessToken(claims.Username, role)
+	if err != nil {
+		log.Printf("Error generating new access token: %v", err)
+		http.Error(w, "Failed to generate new access token", http.StatusInternalServerError)
+		return
+	}
+
+	_, err = db.Exec("UPDATE tokens SET access_token = ? WHERE username = ?", newAccessToken, claims.Username)
+	if err != nil {
+		log.Printf("Error updating access token in the database: %v", err)
+		http.Error(w, "Failed to update access token", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"access_token": newAccessToken})
 }
