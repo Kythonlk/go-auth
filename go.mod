@@ -1,4 +1,4 @@
-module github.com/kythonlk/go-auth
+module github.com/kythonlk/sqlauthgo
 
 go 1.22.4
 
