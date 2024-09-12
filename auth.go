@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// Init Auth
 func InitAuth(driver, dsn string) error {
 	var err error
 	db, err = sql.Open(driver, dsn)
@@ -26,6 +27,7 @@ func InitAuth(driver, dsn string) error {
 	return nil
 }
 
+// Login Handler
 func Login(w http.ResponseWriter, r *http.Request) {
 	var loginRequest LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&loginRequest); err != nil {
@@ -52,7 +54,7 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	refreshToken, err := generateRefreshToken(loginRequest.Username)
+	refreshToken, err := generateRefreshToken(loginRequest.Username, role)
 	if err != nil {
 		http.Error(w, "Failed to generate refresh token", http.StatusInternalServerError)
 		return
@@ -72,6 +74,7 @@ func Login(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Register Handler
 func Register(w http.ResponseWriter, r *http.Request) {
 	var registerRequest RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&registerRequest); err != nil {
@@ -102,6 +105,7 @@ func Register(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "User registered successfully"})
 }
 
+// RefreshToken Handler
 func RefreshToken(w http.ResponseWriter, r *http.Request) {
 	var requestBody map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
@@ -129,8 +133,8 @@ func RefreshToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var storedRefreshToken, role string
-	err = db.QueryRow("SELECT refresh_token, role FROM tokens WHERE username = ?", claims.Username).Scan(&storedRefreshToken, &role)
+	var storedRefreshToken string
+	err = db.QueryRow("SELECT refresh_token FROM tokens WHERE username = ?", claims.Username).Scan(&storedRefreshToken)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			http.Error(w, "Refresh token not found", http.StatusUnauthorized)
@@ -146,6 +150,18 @@ func RefreshToken(w http.ResponseWriter, r *http.Request) {
 	if storedRefreshToken != refreshToken {
 		log.Printf("Refresh token mismatch: stored=%s, received=%s", storedRefreshToken, refreshToken)
 		http.Error(w, "Invalid refresh token", http.StatusUnauthorized)
+		return
+	}
+
+	var role string
+	err = db.QueryRow("SELECT role FROM users WHERE username = ?", claims.Username).Scan(&role)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "User not found", http.StatusUnauthorized)
+		} else {
+			log.Printf("Error querying user role: %v", err)
+			http.Error(w, "Failed to retrieve user role", http.StatusInternalServerError)
+		}
 		return
 	}
 

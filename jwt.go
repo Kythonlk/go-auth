@@ -19,10 +19,11 @@ func generateAccessToken(username, role string) (string, error) {
 	return token.SignedString(jwtKey)
 }
 
-func generateRefreshToken(username string) (string, error) {
+func generateRefreshToken(username, role string) (string, error) {
 	expirationTime := time.Now().Add(time.Duration(refreshTokenExpiry) * time.Minute)
 	claims := &Claims{
 		Username: username,
+		Role:     role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
 		},
